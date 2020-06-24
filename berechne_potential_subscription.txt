@@ -10,6 +10,7 @@ begin
     declare potential_vgl numeric;
     declare publisher_var STRING;
     declare laufzeitMonat_IST_var INT64;     
+    declare random_variable;
 
 
 create temp table src as 
