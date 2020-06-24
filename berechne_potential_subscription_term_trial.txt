@@ -1,0 +1,110 @@
+
+begin
+
+
+    declare count INT64;             -- Anzahl Zeilen zum iterieren    
+    declare i INT64 default 2;       -- Zähler für Schleife. starte bei Abolaufzeit Monat 2, da Monat 1 schon vorberechnet
+    declare potential_LAG numeric;   -- potential aus dem Vormonat  
+    declare haltbarkeit numeric;    
+    declare potential_IST numeric;
+    declare potential_vgl numeric;
+    declare publisher_var STRING;
+    declare term_var STRING;
+    declare trial_var BOOL;    
+    declare laufzeitMonat_IST_var INT64;     
+
+
+create temp table src as 
+select  
+-- rownumber zum iterieren aller Datensätze zur Berechnung Potential
+ROW_NUMBER() OVER() as row, *, 
+-- berechne Potential für ersten Monat als Ausgangswert für Iteration
+case when abolaufzeit_monat_IST = min_monat then round (cast (haltbarkeit * publisher_summe_total as numeric), 0) end as Potential
+ from ( 
+    -- berechne churn und haltbarkeit auf Grundlage von Summe_abzüglich_vormonat 
+    select *, 
+    round (cast (inactive /  summe_abzueglich_vormonat as numeric), 4) as Churn,
+    round (cast (1 - (inactive /  summe_abzueglich_vormonat) as numeric ), 4) as Haltbarkeit    
+    from (          
+           select 
+           Publisher,
+           term_name,
+           trial,
+           Abolaufzeit_monat_IST,
+           Active,
+           Inactive,
+           Summe, 
+           min_monat,
+           --summe abzüglich vormonate berechnen
+           case when abolaufzeit_monat_IST = min_monat  then publisher_summe_total  
+           when anzahl_monate < 2 then publisher_summe_total
+           else publisher_summe_total -  lag(puplisher_summe_laufend) over (order by Publisher,term_name,trial, Abolaufzeit_monat_IST)  
+           end  as summe_abzueglich_vormonat,
+           -- Hilfsfelder
+           puplisher_summe_laufend,
+           publisher_summe_total
+           from ( 
+                  -- Aufsummierung der Nutzer nach publisher und Abolaufzeit
+                  select
+                        publisher,
+                        term_name,
+                        trial,
+                        cast (MAX_abolaufzeit_monat_IST as int64) as Abolaufzeit_monat_IST ,
+                        min (MAX_abolaufzeit_monat_IST)  over (partition by Publisher,term_name,trial) as min_monat,
+                        count (distinct MAX_abolaufzeit_monat_IST ) over (partition by Publisher,term_name,trial) as anzahl_monate,
+                        SUM(active_users) as Active,
+                        SUM(inactive_users) as Inactive,
+                        SUM(inactive_users)+SUM(active_users) as Summe,
+                        SUM(SUM(inactive_users)+SUM(active_users)) over (partition by Publisher,term_name,trial) as publisher_summe_total,
+                        SUM(SUM(inactive_users)+SUM(active_users)) over (partition by Publisher,term_name,trial order by MAX_abolaufzeit_monat_IST  ) AS puplisher_summe_laufend
+                        from  `go-de-funkedigital.Spaeti.PS_03_Piano_Haltbarkeit_trial_in_Monat`
+                        --where publisher = 'HA'
+                        WHERE statusType NOT LIKE "upgraded"
+                        group by
+                          1,
+                          2,
+                          3,
+                          4
+                          
+           ) order by publisher, term_name, trial, abolaufzeit_monat_IST asc ));   
+
+
+    -- Anzahl Zeilen zum Iterieren
+    set count = (select count(*) from src);       
+    
+    --Iteration: Berechne Potential einzeln pro Monat und Publisher mit Selbsreferenz auf Potential vom Vormonat
+    while  i <= count do    
+    set laufzeitMonat_IST_var = (select abolaufzeit_monat_IST from src where row = i );
+    set potential_vgl = (select Potential from src where row = i );
+    if (potential_vgl is null) then  
+    
+        set publisher_var  = (select publisher from src where row  = (i -1)  );   
+        set term_var = (select term_name from src where row  = (i -1) );
+        set trial_var = (select trial from src where row  = (i -1) ) ;
+        set Potential_Lag =  (select cast (Potential as numeric) from src where  row  = (i -1) and publisher = publisher_var and term_name = term_var and trial_var = trial );         
+        set haltbarkeit   =  (select haltbarkeit from src where row = i and publisher = publisher_var  );                              
+        set potential_IST = round (Potential_LAG * haltbarkeit,0 );            
+        update src set potential = potential_IST where row =  i and publisher = publisher_var ;                                          
+    
+    end if;    
+    set i = i + 1;    
+    end while;    
+
+
+    -- Ergebnisstabelle:
+    -- bilde laufenden abopreis über die Monate und pro Publisher
+    create or replace table `go-de-funkedigital.Spaeti.JJ_03_Piano_Haltbarkeit_trial_in_Monat_Berechnet_term_trial` as
+    select * except (row, puplisher_summe_laufend) from (
+    select *, sum (abopreis) over (partition by Publisher order by abolaufzeit_monat_IST ) as Abopreis_laufend    
+    from ( 
+          -- berechne abopreis auf Grundlage "wahrscheinlich_neuer_abonnent_erreicht_monat" 
+          select *, case when abolaufzeit_monat_IST = 1 then 7.99 else (7.99 * Wahrscheinlichkeit_neuer_abonnent_erreicht_monat ) end as abopreis
+          from (
+                -- berechne "wahrscheinlich_neuer_abonnent_erreicht_monat"
+                select *, round(potential/publisher_summe_total, 2 ) as Wahrscheinlichkeit_neuer_abonnent_erreicht_monat ,        
+                from src 
+                order by publisher, abolaufzeit_monat_IST)));
+    
+    end 
+    
+ 
