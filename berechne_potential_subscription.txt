@@ -12,6 +12,7 @@ begin
     declare laufzeitMonat_IST_var INT64;     
     declare random_variable;
     declare experimental_random_variable;
+    declare experimental_random_variable2;
 
 
 create temp table src as 
