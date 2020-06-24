@@ -11,6 +11,7 @@ begin
     declare publisher_var STRING;
     declare laufzeitMonat_IST_var INT64;     
     declare random_variable;
+    declare experimental_random_variable;
 
 
 create temp table src as 
